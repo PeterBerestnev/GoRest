@@ -1,6 +1,7 @@
 package config
 
 import (
+	"flag"
 	"log"
 	"os"
 	"time"
@@ -18,10 +19,18 @@ type HTTPServer struct {
 	Address     string        `yaml:"address" env-default:"localhost:8080"`
 	TimeOut     time.Duration `yaml:"timeout" env-default:"4s"`
 	IdleTimeout time.Duration `yaml:"idle_timeout" env-default:"60s"`
+	User        string        `yaml:"user" env-required:"true"`
+	Password    string        `yaml:"password" env-required:"true" env:"HTTP_SERVER_PASSWORD"`
+}
+
+var configPath string
+
+func init() {
+	flag.StringVar(&configPath, "config", "config/local.yaml", "path to config file")
+	flag.Parse()
 }
 
 func MustLoad() *Config {
-	configPath := os.Getenv("CONFIG_PATH")
 	if configPath == "" {
 		log.Fatal("CONFIG_PATH is not set")
 	}
