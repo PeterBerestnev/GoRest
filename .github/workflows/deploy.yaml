@@ -50,8 +50,8 @@ jobs:
           
           # Проверка доступности сервера
           echo "Checking SSH connection..."
-          if ! nc -z -w 5 $(echo "${{ env.HOST }}" | cut -d'@' -f2) 22; then
-            echo "::error::SSH port 22 is not accessible"
+          if ! nc -z -w 5 $(echo "${{ env.HOST }}" | cut -d'@' -f2) 29; then
+            echo "::error::SSH port 29 is not accessible"
             exit 1
           fi
 
