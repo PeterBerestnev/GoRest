@@ -18,51 +18,99 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
         with:
           ref: ${{ github.event.inputs.tag }}
-      - name: Check if tag exists
+          fetch-depth: 0
+
+      - name: Verify tag exists
         run: |
-          git fetch --all --tags
-          if ! git tag | grep -q "^${{ github.event.inputs.tag }}$"; then
-            echo "error: Tag '${{ github.event.inputs.tag }}' not found"
+          if ! git rev-parse "${{ github.event.inputs.tag }}" >/dev/null 2>&1; then
+            echo "::error::Tag '${{ github.event.inputs.tag }}' not found"
             exit 1
           fi
+
       - name: Set up Go
-        uses: actions/setup-go@v2
+        uses: actions/setup-go@v4
         with:
-          go-version: 1.24.5
+          go-version: '1.24.5'
+
       - name: Build app
         run: |
+          set -e
           go mod download
           go build -o url-shortener ./cmd/url-shortener
-      - name: Deploy to VM
+
+      - name: Prepare SSH connection
+        timeout-minutes: 5
         run: |
-          sudo apt-get install -y ssh rsync
+          set -e
           echo "$DEPLOY_SSH_KEY" > deploy_key.pem
           chmod 600 deploy_key.pem
-          ssh -i deploy_key.pem -o StrictHostKeyChecking=no ${{ env.HOST }} "mkdir -p ${{ env.DEPLOY_DIRECTORY }}"
-          rsync -avz -e 'ssh -i deploy_key.pem -o StrictHostKeyChecking=no' --exclude='.git' ./ ${{ env.HOST }}:${{ env.DEPLOY_DIRECTORY }}
+          
+          # Проверка доступности сервера
+          echo "Checking SSH connection..."
+          if ! nc -z -w 5 $(echo "${{ env.HOST }}" | cut -d'@' -f2) 22; then
+            echo "::error::SSH port 22 is not accessible"
+            exit 1
+          fi
+
+          # Тестовое подключение
+          ssh -i deploy_key.pem \
+              -o StrictHostKeyChecking=no \
+              -o ConnectTimeout=15 \
+              -o BatchMode=yes \
+              ${{ env.HOST }} "echo 'SSH connection successful'"
         env:
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-      - name: Remove old systemd service file
+
+      - name: Deploy files
         run: |
-          ssh -i deploy_key.pem -o StrictHostKeyChecking=no ${{ env.HOST }} "rm -f /etc/systemd/system/url-shortener.service"
-      - name: List workspace contents
+          set -e
+          ssh -i deploy_key.pem -o StrictHostKeyChecking=no ${{ env.HOST }} \
+            "mkdir -p ${{ env.DEPLOY_DIRECTORY }}"
+          
+          rsync -avz \
+            -e 'ssh -i deploy_key.pem -o StrictHostKeyChecking=no -o ConnectTimeout=15' \
+            --exclude='.git' \
+            --exclude='deploy_key.pem' \
+            ./ ${{ env.HOST }}:${{ env.DEPLOY_DIRECTORY }}
+
+      - name: Verify deployment files
         run: |
-          echo "Listing deployment folder contents:"
-          ls -la ${{ github.workspace }}/deployment
-      - name: Create environment file on server
+          if [ ! -f "./deployment/url-shortener.service" ]; then
+            echo "::error::Service file not found in deployment directory"
+            exit 1
+          fi
+
+      - name: Configure service
         run: |
-          ssh -i deploy_key.pem -o StrictHostKeyChecking=no ${{ env.HOST }} "\
-          touch ${{ env.ENV_FILE_PATH }} && \
-          chmod 600 ${{ env.ENV_FILE_PATH }} && \
-          echo 'CONFIG_PATH=${{ env.CONFIG_PATH }}' > ${{ env.ENV_FILE_PATH }} && \
-          echo 'HTTP_SERVER_PASSWORD=${{ secrets.AUTH_PASS }}' >> ${{ env.ENV_FILE_PATH }}"
-      - name: Copy systemd service file
+          set -e
+          scp -i deploy_key.pem \
+              -o StrictHostKeyChecking=no \
+              -o ConnectTimeout=15 \
+              ./deployment/url-shortener.service \
+              ${{ env.HOST }}:/tmp/
+
+          ssh -i deploy_key.pem \
+              -o StrictHostKeyChecking=no \
+              -o ConnectTimeout=15 \
+              ${{ env.HOST }} "\
+              mv /tmp/url-shortener.service /etc/systemd/system/ && \
+              touch ${{ env.ENV_FILE_PATH }} && \
+              chmod 600 ${{ env.ENV_FILE_PATH }} && \
+              echo 'CONFIG_PATH=${{ env.CONFIG_PATH }}' > ${{ env.ENV_FILE_PATH }} && \
+              echo 'HTTP_SERVER_PASSWORD=${{ secrets.AUTH_PASS }}' >> ${{ env.ENV_FILE_PATH }}"
+
+      - name: Restart service
         run: |
-          scp -i deploy_key.pem -o StrictHostKeyChecking=no ${{ github.workspace }}/deployment/url-shortener.service ${{ env.HOST }}:/tmp/url-shortener.service
-          ssh -i deploy_key.pem -o StrictHostKeyChecking=no ${{ env.HOST }} "mv /tmp/url-shortener.service /etc/systemd/system/url-shortener.service"
-      - name: Start application
-        run: |
-          ssh -i deploy_key.pem -o StrictHostKeyChecking=no ${{ env.HOST }} "systemctl daemon-reload && systemctl restart url-shortener.service"
+          ssh -i deploy_key.pem \
+              -o StrictHostKeyChecking=no \
+              -o ConnectTimeout=15 \
+              ${{ env.HOST }} "\
+              systemctl daemon-reload && \
+              systemctl restart url-shortener.service && \
+              systemctl status url-shortener.service"
+
+      - name: Cleanup
+        run: rm -f deploy_key.pem
